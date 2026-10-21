@@ -6,6 +6,8 @@ no per-pixel palette work per frame.
 """
 from framebuf import FrameBuffer, MONO_HMSB, GS4_HMSB  # type: ignore
 
+from .paths import res
+
 
 class SpriteStore:
     """GS4 sprite loading and drawing (static icons, badges, art)."""
@@ -26,7 +28,7 @@ class SpriteStore:
             (bytearray): GS4_HMSB packed sprite data.
         """
         array_size = w * h
-        with open(path, "rb") as f:
+        with open(res(path), "rb") as f:
             buf = bytearray(f.read(array_size))
             fb = FrameBuffer(buf, w, h, MONO_HMSB)
             out = bytearray((array_size + 1) // 2)

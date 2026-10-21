@@ -8,6 +8,8 @@ while tuning.
 """
 import json
 
+from .paths import res
+
 
 def load(path):
     """Load a JSON artwork file into a VectorRenderer definition dict.
@@ -15,7 +17,7 @@ def load(path):
     Placement is NOT part of the artwork - the app passes x/y/height
     to VectorRenderer.
     """
-    with open(path) as f:
+    with open(res(path)) as f:
         defn = json.load(f)
     profiles = defn.get('profiles')
     if profiles:

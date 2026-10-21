@@ -2,6 +2,8 @@
 from math import floor
 from framebuf import FrameBuffer, MONO_VLSB, GS4_HMSB  # type: ignore
 
+from .paths import res
+
 
 class XglcdFont(object):
     """Font data in X-GLCD format.
@@ -58,7 +60,7 @@ class XglcdFont(object):
         self.letters = bytearray(bytes_per_letter * self.letter_count)
         mv = memoryview(self.letters)
         offset = 0
-        with open(path, 'rb') as f:
+        with open(res(path), 'rb') as f:
             for line in f:
                 # Stop if font file has more glyphs than requested
                 if offset + bytes_per_letter > len(self.letters):
