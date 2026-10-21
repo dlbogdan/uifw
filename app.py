@@ -98,8 +98,9 @@ class StatLine:
     elapsed, free mem = gc.mem_free() (A5: label it for what it
     measures)."""
 
-    def __init__(self, period_ms):
+    def __init__(self, period_ms, sink=None):
         self.period = period_ms
+        self.sink = sink if sink is not None else print
         self.frames = 0
         self.skip = 0
         self.sum = 0
@@ -121,11 +122,11 @@ class StatLine:
         span = tdiff(now, self.t0)
         if span < self.period:
             return
-        print('scene %.2f fps | work avg %d us (min %d max %d) | '
-              'skipped %d | cpu %d%% | free mem %d'
-              % (self.frames * 1000.0 / span, self.sum // self.frames,
-                 self.min, self.max, self.skip,
-                 100 * self.sum // (span * 1000), gc.mem_free()))
+        self.sink('scene %.2f fps | work avg %d us (min %d max %d) | '
+                  'skipped %d | cpu %d%% | free mem %d'
+                  % (self.frames * 1000.0 / span, self.sum // self.frames,
+                     self.min, self.max, self.skip,
+                     100 * self.sum // (span * 1000), gc.mem_free()))
         self.frames = 0
         self.skip = 0
         self.sum = 0
@@ -270,10 +271,13 @@ class App:
         here once. Wrap-safe via clock.tdiff; zero cost when unset."""
         self._idle = _IdleDim(idle_ms, full, dim)
 
-    def stat(self, period_ms):
+    def stat(self, period_ms, sink=None):
         """Print the README playbook stats line every period_ms,
-        from step()'s own verdicts + work us."""
-        self._stat = StatLine(period_ms)
+        from step()'s own verdicts + work us. sink(line) injects the
+        output path: pass lib.coresys.logger.info (or any fn(str)) to
+        route it into the framework log instead of the serial console
+        (D7 alignment); default sink is print."""
+        self._stat = StatLine(period_ms, sink)
 
     # ---- the heartbeat ----------------------------------------------------
 
