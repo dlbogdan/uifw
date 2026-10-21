@@ -37,13 +37,15 @@ No closure factories needed. Menu.pop() and Menu.close_edit() are
 the app's intent-named navigation calls; input stays on_event's
 path (apps never synthesize events).
 
-STORE PROTOCOL: a config store is any object with load(id) and
-save(id, value) (load_store also iterates store.keys() - dict-like
-managers have it for free). load_store(store) seeds the UI at boot
-(flash -> UI, one call); bind_store(store) makes every editor
-commit and every bool OK toggle call store.save(id, value) BEFORE
-the bound action fires (UI -> flash). The store owns the write:
-actions react/report, they never save again (double write).
+CONFIG BINDING (D9: the engine has no config system): a menu binds the
+framework's ConfigManager with bind_config(cfg, section). The section is
+a dict of id -> value inside that file; every editor commit and every
+bool OK toggle calls cfg.set(section, id, value) BEFORE the bound action
+fires (UI -> config), and cfg.set saves and notifies. bind_config also
+SUBSCRIBES each id (cfg.subscribe('SECTION.id', cb)), so a write from
+outside the UI - device shell, autotest, another task - lands on the
+visible widget without a reload. The config owns the write: actions
+react/report, they never save again (double write).
 
 Fonts: Menu warms the glyph caches IT draws with, at init (row
 font at gs_sel/gs_row/gs_hint, edit font at gs_edit) - the app
@@ -115,7 +117,7 @@ class Menu:
         gs_hint (int): edit-screen chrome shade (item label, hints).
 
     STATE MAP (internal: the app's surface is events + bind()/
-    bind_store()/load_store() + set_value/set_items/get_value/
+    bind_config() + set_value/set_items/get_value/
     get_bool; the fields below are what
     on_event()/draw() move between frames. n = len(levels[-1]) rows in
     the live level; rows = whole rows that fit the viewport):
@@ -198,7 +200,8 @@ class Menu:
         self._t = None
         self.values = {}                    # id -> live badge string
         self.actions = {}                   # id -> fn (app binds)
-        self._store = None                  # config store (bind_store)
+        self._cfg = None                    # ConfigManager (bind_config)
+        self._section = 'UI'                # its section (bind_config)
         self.bools = {}                     # id -> bool ('type: bool')
         self._fed = set()                   # ids feed() GENERATED (S4:
                                             # a prune drops their values/
@@ -303,35 +306,74 @@ class Menu:
         """Attach the app callback for an item id (menu.json 'id')."""
         self.actions[item_id] = fn
 
-    def load_store(self, store):
-        """Seed from a config store (flash -> UI, one call at boot).
-        Iterates the STORE's ids (store.keys()), not the menu tree:
-        the store may hold keys no widget shows, and unknown ids land
-        on set_value's raw-badge path - harmless. Edit items go
-        through the editor round-trip (ranges clamp, floats
-        normalize), so a corrupt config can never garbage the UI.
-        Bool STATE is seeded here too (S2, owner decision: the store
-        is the truth - external paths like MQTT or a telnet console
-        write it, UI toggles write it - and the UI must reflect it;
-        coercion bool(v), as set_bool; a None value keeps the
-        factory default). Seeds fire no action (rule of set_value):
-        a seed is not a user commit."""
-        for iid in store.keys():
+    def bind_config(self, cfg, section='UI', seed=True):
+        """Bind the framework's ConfigManager. D9: config has ONE owner
+        (micropy-system); the engine writes through it and keeps no
+        config of its own. cfg is a manager_config.ConfigManager (the
+        store is a file of its own, e.g. ConfigManager('/app-config.json')
+        — /system-config.json is framework-owned and re-rendered at every
+        provisioning, so device-committed UI values do not belong there).
+
+        UI -> config: every editor commit (LONG_OK / close_edit(True))
+        and every bool OK toggle calls cfg.set(section, id, value) BEFORE
+        the bound action fires. The action therefore sees the value
+        already persisted (cfg.set saves and notifies) and is for
+        react/report only - never save again inside it. Discards and
+        plain triggers write nothing: no state changed.
+
+        config -> UI, two ways: seed=True seeds now from the loaded
+        section, and cfg.subscribe keeps every persisted id live - a
+        write from the device shell, an autotest or another task lands on
+        the visible widget without a reload.
+
+        Measured surface (manager_config.py): .config is a dict of
+        sections, get(section, key, default) RAISES ValueError on a
+        missing key with no default (lines 63-70), set(section, key,
+        value) saves + notifies, subscribe('SECTION.key', cb). The UI
+        therefore reads the SECTION DICT, never get()."""
+        self._cfg = cfg
+        self._section = section
+        if seed:
+            self._seed_config()
+        for iid in list(self.bools) + list(self._editors):
+            cfg.subscribe('%s.%s' % (section, iid),
+                          lambda v, iid=iid: self._config_in(iid, v))
+
+    def _seed_config(self):
+        """Seed the UI from the bound section (config -> UI, one call at
+        boot). Iterates the SECTION's ids, not the menu tree: the section
+        may hold keys no widget shows, and unknown ids land on
+        set_value's raw-badge path - harmless. Edit items go through the
+        editor round-trip (ranges clamp, floats normalize), so a corrupt
+        config can never garbage the UI. Bool STATE seeds here too (S2,
+        owner decision: config is the truth - external paths write it and
+        UI toggles write it - so a bound section WINS over menu.json
+        'value', which is only the FACTORY DEFAULT for ids the section is
+        silent on). Seeds fire no action: a seed is not a user commit."""
+        if self._cfg is None:
+            return
+        sec = self._cfg.config.get(self._section)
+        if not isinstance(sec, dict):
+            return
+        for iid, v in sec.items():
             if iid in self.bools:
-                v = store.load(iid)
                 if v is not None:
                     self.bools[iid] = bool(v)
             else:
-                self.set_value(iid, store.load(iid))
+                self.set_value(iid, v)
 
-    def bind_store(self, store):
-        """Route persistence through the store (UI -> flash): every
-        editor commit (LONG_OK / close_edit(True)) and every bool
-        OK toggle calls store.save(id, value) BEFORE the bound
-        action fires - the action sees the store already written and
-        is for react/report only (do not save again inside it).
-        Discards and plain triggers write nothing: no state changed."""
-        self._store = store
+    def _config_in(self, iid, v):
+        """A config write from OUTSIDE the UI (cfg.subscribe path): the
+        widget follows immediately, no action fires - an external write
+        is not a user commit. An id the UI no longer has (a feed prune
+        dropped the row, the subscription stays on the manager) is
+        ignored: a stale key must not resurrect a value entry."""
+        if iid not in self.bools and iid not in self._editors:
+            return
+        if iid in self.bools:
+            self.set_bool(iid, v)
+        else:
+            self.set_value(iid, v)
 
     def set_value(self, item_id, text):
         """Push a value from OUTSIDE the UI. For an 'edit' item this
@@ -469,11 +511,14 @@ class Menu:
         the old row alive (documented feed lifetime). S4 (owner
         decision): the id's open editor is CLOSED WITHOUT COMMIT (the
         menu must never sit modal for a nonexistent item; a ghost
-        commit would write the store and fire NO action - the binding
+        commit would write the config and fire NO action - the binding
         is pruned with the id); values/bools follow the prune ONLY
         for feed-GENERATED ids (rows churn), while static menu.json
-        ids keep theirs (they are config - load_store doctrine). The
-        bound store is never touched: persistence is the app's."""
+        ids keep theirs (they are config - bind_config doctrine). The
+        bound config is never touched: a dropped feed row does not
+        delete its key (deleting persisted keys is the app's call). A
+        late external write for a pruned id is ignored (_config_in
+        checks the id still exists)."""
         keep = self._ids(new, set())
         for iid in self._ids(old, set()):
             if iid not in keep:
@@ -508,17 +553,24 @@ class Menu:
             if ch:
                 self._collect_bools(ch)
 
+    def _cfg_set(self, iid, value):
+        """One write path, UI -> config (bind_config): ConfigManager.set
+        persists and notifies subscribers. Unbound menus keep their state
+        in RAM only (the app may persist it itself)."""
+        if self._cfg is not None:
+            self._cfg.set(self._section, iid, value)
+
     def _bool_seed(self, it):
         """State seed for a bool item (S2, owner decision 2026-10-20):
-        the STORE is the truth - external paths (MQTT, a telnet
-        protocol, flash) write it, and UI toggles write it
-        (bind_store) - so a bound store WINS; menu.json 'value' is
-        only the FACTORY DEFAULT for ids the store is silent on
+        the CONFIG section is the truth - external paths (device shell, a
+        telnet protocol, flash) write it, and UI toggles write it
+        (_cfg_set) - so a bound section WINS; menu.json 'value' is
+        only the FACTORY DEFAULT for ids the section is silent on
         (None). A re-feed therefore cannot revert a persisted
         toggle. Coercion: bool(v), the same rule as set_bool (push
         real bools/numbers - not 'false', which is truthy)."""
-        if self._store is not None:
-            v = self._store.load(it['id'])
+        if self._cfg is not None:
+            v = self._cfg.config.get(self._section, {}).get(it['id'])
             if v is not None:
                 return bool(v)
         return bool(it.get('value', False))
@@ -553,14 +605,13 @@ class Menu:
                 self._build_editors(ch)
 
     def _commit(self, item_id, text):
-        """Editor done: the value lands (badge shows it), the store
-        persists it (bind_store), then the bound action fires with
+        """Editor done: the value lands (badge shows it), the config
+        persists it (bind_config), then the bound action fires with
         (id, NEW value) - the same symmetry as bool toggles."""
         self.values[item_id] = text
         self._edit = None
         self._edit_it = None
-        if self._store is not None:
-            self._store.save(item_id, text)
+        self._cfg_set(item_id, text)
         fn = self.actions.get(item_id)
         if fn is not None:
             fn(item_id, text)
@@ -648,8 +699,7 @@ class Menu:
             if it.get('type') == 'bool':
                 k = it.get('id')        # checkbox: OK flips the state
                 self.bools[k] = not self.bools.get(k, False)
-                if self._store is not None:
-                    self._store.save(k, self.bools[k])
+                self._cfg_set(k, self.bools[k])
             ed = self._editors.get(it.get('id'))
             if ed is not None:          # editable: OK opens the editor
                 v = self.values.get(it.get('id'))

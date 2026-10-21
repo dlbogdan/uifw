@@ -69,24 +69,6 @@ def _pin(p):
     return p if hasattr(p, 'value') else Pin(p)
 
 
-class DictStore:
-    """Store protocol (menu.py) over a plain dict: the app's CFG
-    becomes a config store in one line - menu.load_store(DictStore(CFG))
-    seeds, menu.bind_store(DictStore(CFG)) persists."""
-
-    def __init__(self, d):
-        self.d = d
-
-    def keys(self):
-        return self.d.keys()
-
-    def load(self, iid):
-        return self.d.get(iid)
-
-    def save(self, iid, value):
-        self.d[iid] = value
-
-
 class StatLine:
     """The README playbook stats line: accumulates step verdicts +
     work us, prints when due. The format is FIXED by the README -
@@ -177,7 +159,8 @@ class App:
     Members (public on purpose - composition, not encapsulation):
         display, chain, scene, q, sources, frame_ms, fps, refresh_hz,
         focus (widget with on_event), on_event (fallback fn(ev)),
-        sched (assign a clock.Sched to enable).
+        sched (assign a clock.Sched to enable; attach_sched(tasks)
+        ticks it on the framework TaskManager).
     """
 
     def __init__(self, spi_id=0, spi_baud=25000000, spi_sck=None,
@@ -278,6 +261,26 @@ class App:
         route it into the framework log instead of the serial console
         (D7 alignment); default sink is print."""
         self._stat = StatLine(period_ms, sink)
+
+    def attach_sched(self, tasks, interval_ms=100, task_id='ui-sched'):
+        """Run this App's clock.Sched on the framework TaskManager
+        (D9: the engine calls the framework object it is handed; there is
+        no adapter module). app.sched must be assigned first.
+
+        The periodic path takes the SYNC update_func form (measured
+        manager_tasks signature: task_id, update_func, interval_ms,
+        description, is_coroutine). Cadence rule: this ticks the Sched,
+        so interval_ms must be at or below what the scheduled callbacks
+        expect; the DISPLAY heartbeat stays in step()/pace() (frame
+        budget), it is not a TaskManager task. Returns whatever
+        ensure_periodic_task returns."""
+        if self.sched is None:
+            raise ValueError('App.attach_sched: assign app.sched first')
+        return tasks.ensure_periodic_task(
+            task_id, lambda: self.sched.tick(ticks_ms()),
+            interval_ms=interval_ms,
+            description='uifw clock.Sched',
+            is_coroutine=False)
 
     # ---- the heartbeat ----------------------------------------------------
 
