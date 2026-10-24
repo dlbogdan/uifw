@@ -455,9 +455,23 @@ class Menu:
                     self.target = self.sel_target = 0
                     self.selq = self.scroll = 0
                 else:
+                    was = (self.target, self.sel_target)
                     self._select(self.idx[-1])  # clamp idx + targets
-                    self.selq = self.sel_target
-                    self.scroll = self.target
+                    if (self.target, self.sel_target) != was:
+                        # The replacement MOVED the geometry (rows came or
+                        # went, the index got clamped): land at once, a
+                        # glide would cross rows that no longer exist. A
+                        # STEADY re-feed (same rows, refreshed badges - an
+                        # app refreshing readings every sample) leaves the
+                        # pair ALONE: the unconditional sync below used to
+                        # teleport an in-flight glide to the target on every
+                        # refresh, which reads as the selection running far
+                        # too fast. Measured in demo-boiler 'Rooms' (fed at
+                        # the app's 200 ms sample cadence): the last 7.58 px
+                        # of a 14 px row arrived in ONE write, where the
+                        # frames before it stepped 2.16 px.
+                        self.selq = self.sel_target
+                        self.scroll = self.target
                 break
 
     def feed(self, item_id, rows, label, badge=None, key=None,
