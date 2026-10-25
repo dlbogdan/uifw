@@ -202,6 +202,9 @@ class Menu:
         self.actions = {}                   # id -> fn (app binds)
         self._cfg = None                    # ConfigManager (bind_config)
         self._section = 'UI'                # its section (bind_config)
+        self._cbs = {}                      # id -> the callback object
+                                            # handed to cfg.subscribe
+                                            # (the unsubscribe handle)
         self.bools = {}                     # id -> bool ('type: bool')
         self._fed = set()                   # ids feed() GENERATED (S4:
                                             # a prune drops their values/
@@ -329,18 +332,62 @@ class Menu:
         write from the device shell, an autotest or another task lands on
         the visible widget without a reload.
 
+        Listener lifetime (R3, measured against manager_config.py):
+        subscribe dedupes by callback OBJECT (:115) and
+        unsubscribe(key_path, callback) matches that same object (:122).
+        The engine therefore keeps the closure it handed over, one per id
+        in self._cbs: rebinding an id releases the previous listener
+        before installing the new one, an id that goes away is
+        unsubscribed (_prune), and an id that APPEARS later (a fed or
+        re-fed row under a bound config) is subscribed by set_items.
+        bind_config used to build a FRESH lambda per id per call, which
+        neither deduped nor could be removed: a second bind_config
+        stacked listeners and every write re-entered _config_in once per
+        stale closure, and ids introduced after the bind were never
+        subscribed at all.
+
         Measured surface (manager_config.py): .config is a dict of
         sections, get(section, key, default) RAISES ValueError on a
         missing key with no default (lines 63-70), set(section, key,
-        value) saves + notifies, subscribe('SECTION.key', cb). The UI
-        therefore reads the SECTION DICT, never get()."""
+        value) saves + notifies, subscribe('SECTION.key', cb),
+        unsubscribe('SECTION.key', cb). The UI therefore reads the
+        SECTION DICT, never get()."""
+        if self._cfg is not None and self._cfg is not cfg:
+            self._release_subs()        # handles belong to the OLD manager
         self._cfg = cfg
         self._section = section
         if seed:
             self._seed_config()
         for iid in list(self.bools) + list(self._editors):
-            cfg.subscribe('%s.%s' % (section, iid),
-                          lambda v, iid=iid: self._config_in(iid, v))
+            self._subscribe(iid)
+
+    def _sub_key(self, iid):
+        return '%s.%s' % (self._section, iid)
+
+    def _subscribe(self, iid):
+        """One live subscription per id, WITH the handle kept (R3):
+        manager_config dedupes by callback object, so a fresh closure per
+        bind is an extra listener that nothing can remove."""
+        if self._cfg is None:
+            return
+        self._unsubscribe(iid)
+        key = self._sub_key(iid)
+
+        def cb(v, iid=iid):
+            self._config_in(iid, v)
+        self._cbs[iid] = cb
+        self._cfg.subscribe(key, cb)
+
+    def _unsubscribe(self, iid):
+        cb = self._cbs.pop(iid, None)
+        if cb is not None and self._cfg is not None:
+            self._cfg.unsubscribe(self._sub_key(iid), cb)
+
+    def _release_subs(self):
+        """Drop every listener this menu installed on its current
+        manager (rebind to another manager/section, or unbind)."""
+        for iid in list(self._cbs):
+            self._unsubscribe(iid)
 
     def _seed_config(self):
         """Seed the UI from the bound section (config -> UI, one call at
@@ -368,9 +415,9 @@ class Menu:
     def _config_in(self, iid, v):
         """A config write from OUTSIDE the UI (cfg.subscribe path): the
         widget follows immediately, no action fires - an external write
-        is not a user commit. An id the UI no longer has (a feed prune
-        dropped the row, the subscription stays on the manager) is
-        ignored: a stale key must not resurrect a value entry."""
+        is not a user commit. An id the UI no longer has is ignored: a
+        prune releases its listener (R3), but a write that raced the
+        prune must not resurrect a value entry."""
         if iid not in self.bools and iid not in self._editors:
             return
         if iid in self.bools:
@@ -453,6 +500,18 @@ class Menu:
         if old:
             self._prune(old, items)     # caches of removed ids must
                                         # not leak across refreshes
+        if self._cfg is not None:
+            # R3: ids this list INTRODUCES are subscribed here — a row
+            # that appears after bind_config would otherwise stay
+            # invisible to every config write. Only ids in the NEW
+            # content, and only the config-backed ones (bool/edit): a
+            # static id that left the tree keeps its STATE (S4) but not
+            # a listener, and plain badge rows are app-driven, never
+            # config-backed. Ids that already have one are left alone.
+            for iid in self._ids(items, set()):
+                if iid not in self._cbs and (iid in self.bools or
+                                             iid in self._editors):
+                    self._subscribe(iid)
         for k, lv in enumerate(self.levels):
             if lv is old:               # a live level shows this list
                 self.levels[k] = items
@@ -558,6 +617,9 @@ class Menu:
                 self._ehints.pop(iid, None)
                 self._lw.pop(iid, None)
                 self.actions.pop(iid, None)
+                self._unsubscribe(iid)    # R3: the manager's listener
+                                          # goes with the id (a fed list
+                                          # churns per refresh)
                 if iid in self._fed:
                     self._fed.discard(iid)
                     self.values.pop(iid, None)
