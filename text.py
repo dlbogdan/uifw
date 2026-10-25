@@ -10,6 +10,13 @@ Two paths:
 from .surface import Surface
 
 
+def _as_char(c):
+    """Element of a pre-split iterable -> the 1-char string the
+    per-character font path wants (iterables may hold chars, ints or
+    bytes). Hot path (get_gs4_ord) never calls this."""
+    return chr(c) if isinstance(c, int) else str(c)
+
+
 class TextRenderer:
     """Render text with one font onto any Surface.
 
@@ -31,6 +38,10 @@ class TextRenderer:
         keep the per-character path. For absolute zero, pre-split the
         string once and pass the iterable: draw accepts any iterable.
 
+        text (string | iterable): a string takes the encode() fast
+        path; any iterable of characters (or ordinals) takes the
+        per-element path - the pre-split form this docstring promises.
+
         Args:
             surface (Surface): Target surface.
             x (int): Starting X position.
@@ -46,7 +57,12 @@ class TextRenderer:
         font = self.font
         get = getattr(font, 'get_gs4_ord', None)
         if get is not None:
-            for b in text.encode():
+            if isinstance(text, str):
+                ords = text.encode()      # the promised allocation-free path
+            else:
+                # pre-split iterable: chars or ordinals, never .encode()
+                ords = (ord(c) if isinstance(c, str) else c for c in text)
+            for b in ords:
                 glyph = get(b, gs)
                 if glyph is None:
                     continue  # unsupported char: skip it, draw the rest
@@ -56,7 +72,7 @@ class TextRenderer:
                 x += w + spacing
             return
         for letter in text:
-            glyph = font.get_letter_gs4(letter, gs)
+            glyph = font.get_letter_gs4(_as_char(letter), gs)
             if glyph is None:
                 continue  # unsupported char: skip it, draw the rest
                           # (measure_text counts it as 0 too)
