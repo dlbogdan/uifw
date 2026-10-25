@@ -36,7 +36,12 @@ surfaces start zeroed, so a new chain starts IN SYNC with a
 known-blank panel; the assumption is that nothing else wrote to
 the panel between Display() and SwapChain().
 Cost: one 8 KB frame per fault - and a wire that never recovers
-costs one whole frame per frame.
+costs one whole frame per frame. The engine does NOT surface any of
+this: selftest.ui_status is the only reader of chain.error in the
+package, and no code between Scene.frame and App.step reads either
+readout, while present() keeps returning y1 >= 0 over a dead wire.
+Polling chain.in_sync / chain.error is the APP's job; an app that
+does not poll never learns the panel is wrong.
 
 Naming: async_double is the honest axis - it asks WHO ABSORBS THE
 SPI TIME, your loop or a core-1 thread. The buffer count (2 vs 1)
@@ -65,6 +70,9 @@ Usage:
         chain.clear()
         renderer.draw(chain.back_buffer, t)  # draw into back buffer
         chain.present()                      # send to panel, swap
+        # present() returning >= 0 is NOT proof the panel is right:
+        # chain.in_sync / chain.error are, and nothing asks unless
+        # the caller does
     ...
     if chain.close():                        # worker acked exit...
         display.cleanup()                    # ...only now is SPI free
@@ -356,7 +364,9 @@ class SwapChain:
         accepted is on the glass). False = a transfer failed (or the
         worker died) and the panel holds LESS than the surfaces do;
         every later present() sends a whole frame until one lands, so
-        this is a diagnostic, not something the app has to act on.
+        recovery is automatic - this readout is for KNOWING, not for
+        driving the repair, and nothing in the engine polls it for
+        you.
 
         Deliberately separate from error: error is the first
         historical failure and stays set, while in_sync returns to
