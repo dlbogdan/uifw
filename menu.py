@@ -485,10 +485,12 @@ class Menu:
         the driver's to give, not menu.json's. New labels are measured
         (marquee), bool/edit kinds collected, caches of REMOVED ids
         are pruned, and nav stays sane: inside the replaced level
-        (clamped; emptied -> reset to top) or - when the replacement
-        ORPHANS a deeper level - nav TRUNCATES into the new list
-        (S3, owner decision: the user lands where the content
-        changed)."""
+        (clamped; emptied -> reset to top) or, for a live level DEEPER
+        than the replaced one, by ID PATH (_relink): the depth is kept
+        when the path into it still exists and TRUNCATES only on a real
+        orphan (S3, owner decision: the user lands where the content
+        changed - R5: a steady re-feed of the same ids does not move
+        the user at all)."""
         it = self._find(item_id, self.levels[0])
         if it is None:
             return
@@ -518,14 +520,7 @@ class Menu:
             if lv is old:               # a live level shows this list
                 self.levels[k] = items
                 if k < len(self.levels) - 1:
-                    # S3: every live level DEEPER than k was the old
-                    # subtree's children - unreachable from the tree
-                    # now, yet still drawn and navigated (the ghost
-                    # level). Truncate the stack to the replaced
-                    # level: the user lands IN the new list.
-                    del self.levels[k + 1:]
-                    del self.titles[k + 1:]
-                    del self.idx[k + 1:]
+                    self._relink(k, old, items)
                 if not items:
                     # empty level: _select bails on n=0, so reset
                     # nav by hand - else idx/targets stay stale
@@ -552,6 +547,58 @@ class Menu:
                         self.selq = self.sel_target
                         self.scroll = self.target
                 break
+
+    def _relink(self, k, old, new):
+        """Reconcile the live levels DEEPER than a replaced list by ID
+        PATH; truncate only on a real orphan (R5).
+
+        S3 (owner decision 2026-10-20, pinned by test_menu 17) is the
+        orphan half and stands: when the subtree the user is standing
+        in is gone from the tree, the stack truncates into the new list
+        and the user lands where the content changed. What S3 did not
+        cover is the STEADY re-feed: an app refreshing the same list at
+        its sample cadence hands over NEW dicts for the SAME ids, so
+        the level the user stands in is a different OBJECT on the same
+        id path. Object identity called that an orphan and ejected the
+        user one level up per refresh - measured depth 3 -> 2 after one
+        re-feed, 2 after four, so a list fed at the cadence cannot be
+        browsed below itself.
+
+        One level at a time: the deeper level came from the row of the
+        previous level whose 'children' IS that level. If a row with
+        that id still exists in the new previous level and still has
+        children, the stack keeps its depth and takes the new list
+        object (title from the new row, index reset if the new list is
+        too short to hold it). Otherwise truncate there — S3."""
+        cut = None
+        prev_new = new
+        for j in range(k + 1, len(self.levels)):
+            lv = self.levels[j]
+            prev_old = old if j == k + 1 else self.levels[j - 1]
+            iid = None
+            for it in prev_old:
+                if it.get('children') is lv:
+                    iid = it.get('id')
+                    break
+            row = None
+            if iid is not None:
+                for cand in prev_new:
+                    if cand.get('id') == iid:
+                        row = cand
+                        break
+            ch = row.get('children') if row is not None else None
+            if not ch:
+                cut = j
+                break
+            self.levels[j] = ch
+            self.titles[j] = row.get('title', row['label'])
+            if self.idx[j] > len(ch) - 1:
+                self.idx[j] = 0      # the remembered row is gone
+            prev_new = ch
+        if cut is not None:
+            del self.levels[cut:]
+            del self.titles[cut:]
+            del self.idx[cut:]
 
     def feed(self, item_id, rows, label, badge=None, key=None,
              on_pick=None):
