@@ -37,9 +37,11 @@ known-blank panel; the assumption is that nothing else wrote to
 the panel between Display() and SwapChain().
 Cost: one 8 KB frame per fault - and a wire that never recovers
 costs one whole frame per frame. The engine does NOT surface any of
-this: selftest.ui_status is the only reader of chain.error in the
-package, and no code between Scene.frame and App.step reads either
-readout, while present() keeps returning y1 >= 0 over a dead wire.
+this: selftest reads chain.error in exactly two places, the POST
+probe (selftest.py:81) and the ui_status readout (:105); no engine
+module reads in_sync at all, and nothing between Scene.frame and
+App.step reads either, while present() keeps returning y1 >= 0 over
+a dead wire.
 Polling chain.in_sync / chain.error is the APP's job; an app that
 does not poll never learns the panel is wrong.
 
