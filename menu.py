@@ -211,6 +211,8 @@ class Menu:
                                             # bools; static ids keep theirs)
         self._collect_bools(defn['items'])
         self._editors = {}                  # id -> editor ('edit: ...')
+        self._ekind = {}                    # id -> the editor DEFINITION
+                                            # it was built from (_edit_sig)
         self._ehints = {}                   # id -> per-item hints list
         self._edit = None                   # open editor (modal)
         self._edit_it = None                # its item (title source)
@@ -614,6 +616,7 @@ class Menu:
         for iid in self._ids(old, set()):
             if iid not in keep:
                 self._editors.pop(iid, None)
+                self._ekind.pop(iid, None)
                 self._ehints.pop(iid, None)
                 self._lw.pop(iid, None)
                 self.actions.pop(iid, None)
@@ -693,19 +696,38 @@ class Menu:
     def _build_editors(self, items):
         """Instantiate the editors declared by 'edit' items ONCE at
         init (rule 6: no modal setup work when the modal opens). The
-        editor rect is derived from the panel; params are item data."""
+        editor rect is derived from the panel; params are item data.
+
+        One object per id, KEPT across re-feeds (R4): the instance holds
+        the draft text and the on_done/on_cancel closures, and an open
+        modal is attached to it. Rebuilding a survivor orphaned that
+        instance - the modal kept drawing and owning input while
+        self._editors held a different object, so the edit screen the
+        user was typing into could no longer reach the ledger. A
+        rebuild happens only when the item's EDITOR DEFINITION changed
+        (_edit_sig); a rebuild under a live modal closes it WITHOUT
+        commit, the same rule S4 applies to a removed id."""
         for it in items:
             kind = it.get('edit')
             if kind:
                 iid = it['id']
-                ed = editors.build(kind, it, self.edit_text,
-                                   self.x + 6, self.y + 30, self.w - 12,
-                                   gs=self.gs_edit)
+                sig = self._edit_sig(it)
+                ed = self._editors.get(iid)
+                if ed is not None and self._ekind.get(iid) != sig:
+                    ed = None            # the definition moved: rebuild
                 if ed is None:
-                    raise ValueError('unknown edit kind: %r' % kind)
-                ed.on_done = lambda text, iid=iid: self._commit(iid, text)
-                ed.on_cancel = self._close_edit
-                self._editors[iid] = ed
+                    if self._edit_it is not None and \
+                            self._edit_it.get('id') == iid:
+                        self._close_edit()
+                    ed = editors.build(kind, it, self.edit_text,
+                                       self.x + 6, self.y + 30, self.w - 12,
+                                       gs=self.gs_edit)
+                    if ed is None:
+                        raise ValueError('unknown edit kind: %r' % kind)
+                    ed.on_done = lambda text, iid=iid: self._commit(iid, text)
+                    ed.on_cancel = self._close_edit
+                    self._editors[iid] = ed
+                    self._ekind[iid] = sig
                 if 'hints' in it:
                     self._ehints[iid] = it['hints']
                 if iid not in self.values:
@@ -719,6 +741,15 @@ class Menu:
             ch = it.get('children')
             if ch:
                 self._build_editors(ch)
+
+    def _edit_sig(self, it):
+        """The part of an item dict editors.build() reads: the kind plus
+        charset/max/mask (text) and min/max/dp (numeric). Equal
+        signature = the SAME editor object is correct for this item;
+        anything else is a changed definition and the editor is rebuilt
+        (R4's reuse test)."""
+        return (it.get('edit'), it.get('charset'), it.get('max'),
+                it.get('mask'), it.get('min'), it.get('dp'))
 
     def _commit(self, item_id, text):
         """Editor done: the value lands (badge shows it), the config
