@@ -309,13 +309,19 @@ class App:
                 if self._idle.on:
                     self.display.set_brightness(self._idle.full)
                     self._idle.on = False
-            focus = self.focus
-            fb = self.on_event
+            # C2: focus is resolved PER EVENT. A handler that moves
+            # focus (OK opens the editor, a trigger pops a screen, a
+            # gesture closes a modal) must not keep delivering the
+            # rest of the SAME drained batch to itself: the pre-fix
+            # snapshot routed every event to the focus of the first.
+            # The fallback is re-read on the same pass, so an app that
+            # clears focus mid-batch starts reaching on_event at once.
             for ev in evs:
+                focus = self.focus
                 if focus is not None and hasattr(focus, 'on_event'):
                     focus.on_event(ev)
-                elif fb is not None:
-                    fb(ev)
+                elif self.on_event is not None:
+                    self.on_event(ev)
         if self.sched is not None and self.sched.tick(now):
             self.scene.invalidate()       # a fired timer is an event
         if self._idle is not None:
