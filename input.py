@@ -59,6 +59,19 @@ class Buttons:
     Poll at <= debounce/2 ms for crisp edges. Buttons-only config:
     map UP/DOWN here too - repeat makes held keys scroll.
 
+    DEBOUNCE MEANING (C1): the level must SETTLE - stay - for
+    debounce ms before the state changes. The settle clock starts at
+    the FIRST POLL that observes the new level (the poller cannot know
+    when the metal actually moved), so acceptance lands at
+    debounce + one poll interval after the edge. Before C1 the gate
+    timed from the last ACCEPTED transition instead, which inverted
+    the rule: a 1 ms glitch fired an event at every poll rate measured
+    (1, 5, 10 ms) as long as the previous accepted edge was older
+    than debounce, and two legitimate 40 ms taps 40 ms apart produced
+    ONE event - the second swallowed. One clock for the CANDIDATE raw
+    level (b[9]/b[10]) and one for the ACCEPTED state (b[2]/b[3]) is
+    what makes the window a window.
+
     Per-button gesture options (3rd tuple element, dict):
         release (bool): fire ev on RELEASE instead of press (tap).
         long ((ev, ms)): held past ms -> fire ev once per hold;
@@ -90,7 +103,9 @@ class Buttons:
         self.repeat = repeat
         self.active_low = active_low
         # per button: [pin, ev, state, last_change_ms, last_fire_ms,
-        # release, long_ev, long_ms, long_fired].
+        # release, long_ev, long_ms, long_fired, cand, cand_t].
+        # b[2]/b[3] are the ACCEPTED state and its edge; b[9]/b[10] the
+        # CANDIDATE raw level and when a poll first saw it (C1).
         # Seed state from the pins: a button held at boot is already
         # pressed and must NOT fire a phantom event on first poll
         # (unseeded 0 + last_change 0 means "released, settled").
@@ -98,29 +113,36 @@ class Buttons:
         for entry in mapping:
             opts = entry[2] if len(entry) > 2 else {}
             long_ev, long_ms = opts.get('long', (None, 0))
+            seed = 1 - entry[0].value() if active_low else entry[0].value()
             self.btns.append(
-                [entry[0], entry[1],
-                 1 - entry[0].value() if active_low
-                 else entry[0].value(),
+                [entry[0], entry[1], seed,
                  0, 0, bool(opts.get('release')), long_ev, long_ms,
-                 False])
+                 False, seed, 0])
 
     def poll(self, now):
         for b in self.btns:
             raw = b[0].value()
             v = 1 - raw if self.active_low else raw
-            if v != b[2]:
-                if _tdiff(now, b[3]) >= self.debounce:
-                    b[2] = v
-                    b[3] = now
-                    if v:
-                        b[8] = False       # new hold: re-arm long
-                        if not b[5]:
-                            self.q.push(b[1])
-                            b[4] = now
-                    elif b[5] and not b[8]:
-                        self.q.push(b[1])  # tap: release-fire
-            elif v:
+            if v != b[9]:
+                # candidate level: its settle clock STARTS here (C1).
+                # Nothing is decided from it until it holds still for
+                # debounce ms.
+                b[9] = v
+                b[10] = now
+            elif v != b[2] and _tdiff(now, b[10]) >= self.debounce:
+                # settled: the candidate becomes the accepted state
+                b[2] = v
+                b[3] = now
+                if v:
+                    b[8] = False       # new hold: re-arm long
+                    if not b[5]:
+                        self.q.push(b[1])
+                        b[4] = now
+                elif b[5] and not b[8]:
+                    self.q.push(b[1])  # tap: release-fire
+            elif v and b[2]:
+                # long/repeat run off the ACCEPTED hold only (b[2]): a
+                # candidate that has not settled must not earn a repeat.
                 if b[6] is not None:
                     if not b[8] and _tdiff(now, b[3]) >= b[7]:
                         b[8] = True        # once per hold
@@ -145,7 +167,12 @@ class Encoder:
         sw: push pin, pull-up (None = no push button).
         invert (bool): flip rotation direction.
         steps_per_detent (int): quadrature steps per click.
-        debounce (int): ms, push button.
+        debounce (int): ms, push button. Same settle rule as Buttons
+            (C1): the level must stay put for debounce ms, clocked from
+            the first poll that sees it. Quadrature transitions are
+            NOT debounced this way - detent counting is the filter
+            there (steps_per_detent), and a 1 ms push glitch no longer
+            fires OK.
     """
 
     # delta from state(last)*4 + state(now), states = (a<<1)|b
@@ -163,6 +190,9 @@ class Encoder:
         # seed push state from the pin: held at boot must not fire OK
         self.sw_state = 1 - sw.value() if sw is not None else 0
         self.sw_t = 0
+        # candidate level + its settle clock (C1, same rule as Buttons)
+        self.sw_cand = self.sw_state
+        self.sw_cand_t = 0
 
     def poll(self, now):
         s = (self.a.value() << 1) | self.b.value()
@@ -179,8 +209,11 @@ class Encoder:
                     self.q.push(UP)
         if self.sw is not None:
             v = 1 - self.sw.value()          # pull-up: pressed = 0
-            if v != self.sw_state and \
-                    _tdiff(now, self.sw_t) >= self.debounce:
+            if v != self.sw_cand:
+                self.sw_cand = v
+                self.sw_cand_t = now
+            elif v != self.sw_state and \
+                    _tdiff(now, self.sw_cand_t) >= self.debounce:
                 self.sw_state = v
                 self.sw_t = now
                 if v:
