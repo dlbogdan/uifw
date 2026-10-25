@@ -212,15 +212,18 @@ class Menu:
         self._edit = None                   # open editor (modal)
         self._edit_it = None                # its item (title source)
         self._hints = defn.get('editor', {}).get('hints', [])
+        self._bcache = {}                   # BEFORE _build_editors: the
+                                            # seed writes through the
+                                            # value door (_value_set)
         self._build_editors(defn['items'])
         self._lw = {}                       # id -> label width px
         self._measure(defn['items'])
         # per-frame caches (playbook rule 6: draw() allocates
         # nothing): badge text + width + right gutter + label clip,
-        # one entry per id, rebuilt by set_value/set_items; the n/m
+        # one entry per id, invalidated by the value door
+        # (_value_set) and by set_items; the n/m
         # indicator (rebuilt only when sel/n change); the two
         # constant viewport clips
-        self._bcache = {}
         self._ind = None                    # (sel, n, text, w)
         self._clip_p = (x, y + self.y0 - 2, self.list_w,
                         self.list_h + 2 + pill_dy)
@@ -375,6 +378,24 @@ class Menu:
         else:
             self.set_value(iid, v)
 
+    def _value_set(self, item_id, text):
+        """THE door into self.values: write the authoritative value, drop
+        that id's badge cache, warm the glyphs its badge draws. Every
+        writer goes through it — a user commit (_commit), an external
+        write (set_value, and _config_in through it) and a seed
+        (_build_editors, and _seed_config through set_value).
+
+        The writers used to disagree (R1): _commit wrote the dict and
+        left _bcache holding the OLD badge, and _badge_w's contract
+        named only set_value/set_items. An UNBOUND menu kept drawing the
+        pre-commit value on that row; a bound one healed by accident,
+        because cfg.set notifies and the subscription walks back into
+        set_value. Cache invalidation is part of the write, not a
+        caller's chore."""
+        self.values[item_id] = text
+        self._bcache.pop(item_id, None)     # badge text/width changed
+        self._warm_badge(text)
+
     def set_value(self, item_id, text):
         """Push a value from OUTSIDE the UI. For an 'edit' item this
         is the config manager seeding (flash -> UI): the editor's own
@@ -384,14 +405,11 @@ class Menu:
         live badge string (sensor readouts), stored raw. Seeds fire
         no action: a seed is not a user commit (rule of set_bool)."""
         ed = self._editors.get(item_id)
-        self._bcache.pop(item_id, None)     # badge text/width changed
         if ed is None:
-            self.values[item_id] = text          # live badge text
-            self._warm_badge(text)
+            self._value_set(item_id, text)       # live badge text
             return text
         ed.set_text(str(text))
-        self.values[item_id] = ed.get_text()     # validated/normalized
-        self._warm_badge(self.values[item_id])
+        self._value_set(item_id, ed.get_text())  # validated/normalized
         return self.values[item_id]
 
     def _warm_badge(self, text):
@@ -589,6 +607,22 @@ class Menu:
                 return bool(v)
         return bool(it.get('value', False))
 
+    def _val_seed(self, it):
+        """Value seed for an edit item — the SAME precedence _bool_seed
+        states for bools (S2, owner decision), now applied to values
+        (R2): the bound CONFIG section is the truth and menu.json
+        'value' is only the FACTORY DEFAULT for ids it is silent on;
+        None (config silent AND no default declared) seeds nothing.
+        This is what lets an id that APPEARS after bind_config (a fed
+        or re-fed row) take the persisted value instead of the
+        factory one; a value the UI already holds is not re-seeded at
+        all — see _build_editors."""
+        if self._cfg is not None:
+            v = self._cfg.config.get(self._section, {}).get(it['id'])
+            if v is not None:
+                return v
+        return it.get('value')
+
     def get_value(self, item_id):
         """Current value of an 'edit' item (None = never set). Badges
         show it; bound actions read it after a commit."""
@@ -612,8 +646,14 @@ class Menu:
                 self._editors[iid] = ed
                 if 'hints' in it:
                     self._ehints[iid] = it['hints']
-                if 'value' in it:
-                    self.values[iid] = str(it['value'])
+                if iid not in self.values:
+                    # R2: a value the UI already HOLDS survives a
+                    # re-feed. This line used to re-apply the item's
+                    # factory 'value' on every rebuild, so a committed
+                    # 42 was 1 again on the next refresh.
+                    v = self._val_seed(it)
+                    if v is not None:
+                        self._value_set(iid, str(v))
             ch = it.get('children')
             if ch:
                 self._build_editors(ch)
@@ -621,8 +661,10 @@ class Menu:
     def _commit(self, item_id, text):
         """Editor done: the value lands (badge shows it), the config
         persists it (bind_config), then the bound action fires with
-        (id, NEW value) - the same symmetry as bool toggles."""
-        self.values[item_id] = text
+        (id, NEW value) - the same symmetry as bool toggles. The value
+        lands THROUGH the door, so the row's badge cache goes with it
+        (R1: an unbound menu committed 42 and drew the old badge)."""
+        self._value_set(item_id, text)
         self._edit = None
         self._edit_it = None
         self._cfg_set(item_id, text)
@@ -831,8 +873,9 @@ class Menu:
         """(badge, bw, rp, clip_l) cached per id: badge text, its
         width, the gutter it reserves, and the label clip built for
         that gutter - the per-frame row path reads the cache and
-        allocates nothing. Invalidated by set_value (that id) and
-        set_items (content changed)."""
+        allocates nothing. Invalidated by the value door (_value_set:
+        every write into self.values goes through it, commit included)
+        and by set_items (content changed)."""
         iid = it.get('id')
         c = self._bcache.get(iid) if iid is not None else None
         if c is None:
