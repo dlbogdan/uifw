@@ -24,17 +24,27 @@ goes OUT OF SYNC (chain.in_sync False) and every later present()
 sends the WHOLE current frame until one whole-frame transfer
 lands - an identical desired image never suppresses the repair, and
 a partial span of a desynced frame is never trusted. The sync
-verdict is published by the WORKER at transfer end, which is what
-makes a failure that surfaces AFTER the next frame was published
-safe. Initial baseline: Display.__init__ ends with blank()
-(ssd1322.py:222) and both surfaces start zeroed, so a new chain
-starts IN SYNC with a known-blank panel; the assumption is that
-nothing else wrote to the panel between Display() and SwapChain().
-Cost: one 8 KB frame per fault, not per frame.
+verdict is written by the WORKER at transfer end, and publishing
+is serialized behind the in-flight transfer: the handoff has ONE
+slot, so present() of frame N+1 waits out transfer N (measured on
+the host model: claim 0.6 ms, the next publish 5008.9 ms behind a
+transfer held 5 s). There is no window in which a frame is
+published while the previous transfer's outcome is unknown, so
+every publish reads a settled verdict. Initial baseline:
+Display.__init__ ends with blank() (ssd1322.py:222) and both
+surfaces start zeroed, so a new chain starts IN SYNC with a
+known-blank panel; the assumption is that nothing else wrote to
+the panel between Display() and SwapChain().
+Cost: one 8 KB frame per fault - and a wire that never recovers
+costs one whole frame per frame.
 
 Naming: async_double is the honest axis - it asks WHO ABSORBS THE
 SPI TIME, your loop or a core-1 thread. The buffer count (2 vs 1)
-is a consequence, not the choice.
+is a consequence, not the choice. DEPTH IS 1 EITHER WAY: the worker
+claims the next frame only when the running transfer ends, so an
+async chain pays transfer N's wire time at frame N+1 (the ~2.6 ms
+full-frame figure at 25 MHz is what the simulator burns, see
+README's picosim section; the board's own figure is NOT MEASURED).
 
 Lifecycle: present() returns at CLAIM - the instant core 1 has
 taken the WHOLE frame descriptor (bytes + rows as one value); the
@@ -73,7 +83,9 @@ class SwapChain:
         async_double (bool): True (default) = double buffering +
             ASYNC wire: a core-1 thread streams each frame over SPI
             while core 0 draws the next one - frame cost is the draw
-            alone, the ~2.6 ms full-frame transfer is hidden.
+            alone, and the ~2.6 ms full-frame transfer is hidden
+            only while the draw outruns the wire: depth is 1, so a
+            frame that gets ahead waits for transfer N at present().
             WARNING, RAM-hungry: +8 KB second surface and +8 KB
             thread stack, plus ~15% slower XIP reads on core 0.
             False = single buffer, present() blocks until the bytes
