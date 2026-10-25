@@ -516,13 +516,17 @@ def unload():
     """Free the encoder's RAM (bytecode + tables, ~10 KB) while no QR
     is on screen. The app must drop EVERYTHING holding the module:
     its QRRenderer(s) AND its own 'qr' name (functions keep the
-    module's globals alive). Next QR: 'import qr' again - recompile
-    is a fraction of a second, payloads are dynamic anyway.
+    module's globals alive). Next QR: 'import uifw.qr' again -
+    recompile is a fraction of a second, payloads are dynamic anyway.
+
+    Unregisters THIS module by __name__. The engine ships inside the
+    uifw package, so the key is 'uifw.qr'; a literal 'qr' is never in
+    sys.modules and raised KeyError.
 
         scene.remove(qr_item); del qr_item
-        qr.unload()   # drops sys.modules['qr']
+        qr.unload()   # drops sys.modules['uifw.qr']
         del qr        # drop the app's module reference too
         gc.collect()  # ~10 KB back
     """
     import sys
-    del sys.modules['qr']
+    del sys.modules[__name__]
