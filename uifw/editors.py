@@ -34,6 +34,21 @@ ColumnEditor / IntEditor / FloatEditor (digit columns, car-radio):
     form is declared as 'dp' = digits after the point (scale is the
     internal representation); numeric min/max are mandatory for both
     int and float - see build().
+ChoiceEditor (preset options, the 'which mode?' control):
+    UP / BACK   previous option (wraps)
+    DOWN / OK   next option (wraps)
+    The value is NEVER free text: it can only ever be one of the
+    declared 'options' (mandatory, non-empty - raise at init), so an
+    out-of-domain commit is structurally impossible, not validated
+    after the fact. LONG_OK commits the shown option verbatim;
+    nothing else mutates stored state. Display: '< option  i/n >' --
+    the arrows telegraph the spin, the counter bounds the hunt.
+    Masked TextEditor note: the mask covers every cell EXCEPT the
+    one under the cursor -- a fully masked line cannot be edited
+    (you cannot see what you are changing); the cursor cell shows
+    the live character, everything past it stays masked. The layout
+    therefore rebuilds on cursor MOVES too, not only on char edits
+    (still user-paced, never per frame).
 
 Charset is just a string - the editor never hardcodes policy. The
 WIFI_* presets below cover what Wi-Fi actually accepts (SSID:
@@ -195,6 +210,9 @@ class TextEditor(EditorBase):
         elif ev == OK:
             if self.idx < len(buf) - 1:
                 self.idx += 1                 # commit, edit next
+                self._layout_t = None         # unmask the NEW cursor
+                                              # cell, re-mask the old
+                                              # one (masked editors)
             elif len(buf) < self.max_len:
                 buf.append(self.charset[0])   # new cell, editing it
                 self.idx = len(buf) - 1
@@ -232,8 +250,18 @@ class TextEditor(EditorBase):
     def _rebuild(self):
         """Layout table from buf (masked); built on edits (user-paced),
         read every frame: keeps draw() allocation-free (playbook rule
-        6). Empty string lays out one space: the cursor sits on it."""
-        s = ''.join(self.mask or ch for ch in self.buf)
+        6). Empty string lays out one space: the cursor sits on it.
+
+        A masked line that hides the cursor cell CANNOT BE EDITED --
+        every detent lands blind. So the mask covers everything
+        EXCEPT the cell under the cursor: past the cursor the secret
+        stays hidden, at the cursor you see exactly what you are
+        changing."""
+        if self.mask:
+            s = ''.join(ch if i == self.idx else self.mask
+                        for i, ch in enumerate(self.buf))
+        else:
+            s = ''.join(self.buf)
         self._layout_t = self._layout(s if s else ' ')
 
 
@@ -381,11 +409,78 @@ class FloatEditor(ColumnEditor):
                               renderer, gs, blink_hz, on_done, on_cancel)
 
 
+class ChoiceEditor(EditorBase):
+    """Preset-option editor: the value can only ever be one of the
+    declared options, so no free text and no post-hoc validation --
+    an out-of-domain commit is structurally impossible.
+
+    Args:
+        options (list/tuple of str): the closed set, mandatory and
+            non-empty (a choice with no choices is a config error,
+            raised at init where the menu builds its editors).
+        value (str): initial selection; text matching no option
+            leaves the index where it is (open-from-unknown shows
+            option 0 -- the user still can only pick a valid one).
+    Input: UP/BACK previous, DOWN/OK next, both WRAPPING (a two-tap
+    on a three-option list beats hunting). LONG_OK commits the shown
+    option verbatim through on_done; LONG_BACK/SOFT1 discard.
+    """
+
+    def __init__(self, options, value=None, x=0, y=0, w=160,
+                 renderer=None, gs=15, on_done=None, on_cancel=None):
+        EditorBase.__init__(self, x, y, w, renderer, gs, 0,
+                            on_done, on_cancel)
+        self.options = list(options)
+        if not self.options:
+            raise ValueError('choice editor needs a non-empty option list')
+        self.idx = 0
+        if value is not None:
+            try:
+                self.idx = self.options.index(value)
+            except ValueError:
+                pass
+        self._lay = None
+
+    def set_text(self, text):
+        """Select by text (the menu opens with the item's current
+        value); unknown text keeps the last position."""
+        try:
+            self.idx = self.options.index(text)
+        except ValueError:
+            pass
+        self._lay = None
+
+    def get_text(self):
+        return self.options[self.idx]
+
+    def _edit(self, ev):
+        if ev == UP or ev == BACK:
+            self.idx = (self.idx - 1) % len(self.options)
+            self._lay = None
+        elif ev == DOWN or ev == OK:
+            self.idx = (self.idx + 1) % len(self.options)
+            self._lay = None
+
+    def draw(self, surface, t):
+        if not self.visible:
+            return
+        if self._lay is None:
+            # '< option  i/n >': arrows telegraph the spin, the
+            # counter bounds the hunt. Built on edits, read per frame.
+            s = '< %s  %d/%d >' % (self.options[self.idx],
+                                   self.idx + 1, len(self.options))
+            self._lay = self._layout(s)
+        self._draw_line(surface, t, self._lay, 0, -1)
+
+
 def build(kind, it, renderer, x, y, w, gs=None):
     """Factory for menu.py: editor instance for an item dict ('edit'
     key), or None for an unknown kind. Editor params are item data:
     text: charset ('ssid'/'psk'/literal), max, mask (single char,
-    e.g. '*' - password field); int: min/max (whole
+    e.g. '*' - password field; the cursor cell shows the live char,
+    everything past it stays masked); choice: 'options' = non-empty
+    list of preset strings (spun with UP/DOWN, commit verbatim);
+    int: min/max (whole
     numbers); float: min/max + 'dp' = FIXED digits after the point.
     Numeric ranges are MANDATORY - no silent defaults - and a range
     that dp cannot show is a config error: raised at init, where the
@@ -401,6 +496,12 @@ def build(kind, it, renderer, x, y, w, gs=None):
         return TextEditor(x=x, y=y, w=w, renderer=renderer,
                           charset=cs, max_len=it.get('max', 32),
                           mask=it.get('mask'), gs=gs)
+    if kind == 'choice':
+        opts = it.get('options')
+        if not opts:
+            raise ValueError("edit choice: non-empty 'options' required (%r)"
+                             % it.get('id'))
+        return ChoiceEditor(opts, x=x, y=y, w=w, renderer=renderer, gs=gs)
     if kind in ('int', 'float'):
         if 'min' not in it or 'max' not in it:
             raise ValueError('edit %s: min/max required (%r)'

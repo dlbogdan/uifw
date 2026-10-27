@@ -18,7 +18,7 @@ The bound action fires after the toggle and reads the new value
 with get_bool(id). SOFT1 fires the action WITHOUT toggling (a pure
 trigger). set_bool(id, v) pushes external state in (glyph follows).
 
-'edit': 'text' | 'int' | 'float' items open a modal editor
+'edit': 'text' | 'int' | 'float' | 'choice' items open a modal editor
 (editors.py) on OK: the menu draws the chrome (plate, item label,
 hints - per-item 'hints', falling back to the 'editor' section) and
 routes ALL events to it.
@@ -796,7 +796,8 @@ class Menu:
         anything else is a changed definition and the editor is rebuilt
         (R4's reuse test)."""
         return (it.get('edit'), it.get('charset'), it.get('max'),
-                it.get('mask'), it.get('min'), it.get('dp'))
+                it.get('mask'), it.get('min'), it.get('dp'),
+                it.get('options'))
 
     def _commit(self, item_id, text):
         """Editor done: the value lands (badge shows it), the config
