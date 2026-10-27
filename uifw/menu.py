@@ -443,7 +443,10 @@ class Menu:
         caller's chore."""
         self.values[item_id] = text
         self._bcache.pop(item_id, None)     # badge text/width changed
-        self._warm_badge(text)
+        it = self._find(item_id, self.levels[0])
+        if it is None or not it.get('mask'):
+            self._warm_badge(text)          # a masked value draws no
+                                            # badge: warm nothing
 
     def set_value(self, item_id, text):
         """Push a value from OUTSIDE the UI. For an 'edit' item this
@@ -1001,6 +1004,15 @@ class Menu:
     def _badge(self, it):
         if it.get('type') == 'bool':
             return ''          # bool: graphical checkbox, not text
+        if it.get('mask'):
+            # masked editor: the committed value must NEVER reach the
+            # pixels -- not as text, not as mask glyphs, nothing
+            # (owner rule 2026-10-27: a committed password sat in the
+            # row badge in clear text). The value map still HOLDS it
+            # (reopen prefills, get_value works); only the badge is
+            # blind. The mask declaration is the secret marker: no
+            # per-item flag to forget.
+            return ''
         v = self.values.get(it.get('id'))
         if v is not None:
             return v
